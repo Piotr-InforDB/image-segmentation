@@ -1,106 +1,158 @@
+import numpy as np
+import time
+
+from PIL import Image
+from torch.utils.data import Dataset, DataLoader
+import matplotlib.pyplot as plt
+
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torchvision import models, transforms
-from torch.utils.data import DataLoader, Dataset
-from PIL import Image
-import os
-import numpy as np
 
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
-transform_img = transforms.Compose([
-    transforms.Resize((512, 512)),
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomVerticalFlip(),
-    transforms.RandomRotation(15),
-    transforms.ToTensor(),
+from classes.dataset import Data
+from classes.model import UNet
+
+EPOCHS = 25
+BATCH_SIZE = 1
+DATASET_DIR = "dataset-512"
+
+#Augmentation
+train_transform = A.Compose([
+    A.HorizontalFlip(p=0.5),
+    A.VerticalFlip(p=0.5),
+    A.RandomRotate90(p=0.5),
+    A.RandomBrightnessContrast(p=0.2),
+    A.Affine(
+        scale=(0.9, 1.1),
+        translate_percent=(0.1, 0.1),
+        rotate=(-15, 15),
+        shear=(-10, 10),
+        p=0.5
+    ),
+    A.Normalize(),
+    ToTensorV2()
+])
+val_transform = A.Compose([
+    A.Normalize(),
+    ToTensorV2()
 ])
 
-class SegDataset(Dataset):
-    def __init__(self, img_dir, mask_dir, transform=None):
-        self.img_dir = img_dir
-        self.mask_dir = mask_dir
-        self.images = os.listdir(img_dir)
-        self.transform = transform
 
-        self.colormap = {
-            (0, 0, 0): 0,
-            (255, 0, 0): 1,
-        }
+# Define Data
+train_dataset = Data(
+    image_dir=f"{DATASET_DIR}/images/train",
+    mask_dir=f"{DATASET_DIR}/masks/train",
+    transform=train_transform,
+)
+val_dataset = Data(
+    image_dir=f"{DATASET_DIR}/images/val",
+    mask_dir=f"{DATASET_DIR}/masks/val",
+    transform=val_transform
 
-    def __len__(self):
-        return len(self.images)
+)
 
-    def __getitem__(self, idx):
-        img_filename = self.images[idx]
-        img_path = os.path.join(self.img_dir, img_filename)
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
 
-        mask_filename = os.path.splitext(img_filename)[0] + ".png"
-        mask_path = os.path.join(self.mask_dir, mask_filename)
-
-        image = Image.open(img_path).convert("RGB")
-        mask = Image.open(mask_path).convert("RGB")
-
-        if self.transform:
-            image = self.transform(image)
-
-        mask = mask.resize((512, 512), Image.NEAREST)
-
-        mask_np = np.array(mask)
-        mask_class = np.zeros((mask_np.shape[0], mask_np.shape[1]), dtype=np.int64)
-        for color, class_id in self.colormap.items():
-            matches = np.all(mask_np == color, axis=-1)
-            mask_class[matches] = class_id
-
-        mask = torch.tensor(mask_class, dtype=torch.long)
-        return image, mask
-
-
-
-
-transform = transforms.Compose([
-    transforms.Resize((512, 512)),
-    transforms.ToTensor(),
-])
-
-train_data = SegDataset("dataset/images/train", "dataset/masks/train", transform)
-val_data   = SegDataset("dataset/images/val", "dataset/masks/val", transform)
-
-train_loader = DataLoader(train_data, batch_size=10, shuffle=True)
-val_loader   = DataLoader(val_data, batch_size=10, shuffle=False)
-
-model = models.segmentation.deeplabv3_resnet50(weights=None, num_classes=2)
-model = model.to("cuda")
+# Define Model
+model = UNet(n_classes=2)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = model.to(device)
 
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=1e-4)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-for epoch in range(25):
+best_val_loss = float("inf")
+best_model_path = "models/unet_best.pth"
+
+train_losses = []
+val_losses = []
+
+# Train
+for epoch in range(EPOCHS):
+    start = time.time()
+
+    # Training
     model.train()
-    total_train_loss = 0
-    for imgs, masks in train_loader:
-        imgs, masks = imgs.to("cuda"), masks.to("cuda")
+    train_loss = 0.0
+    for images, masks in train_loader:
+        images, masks = images.to(device), masks.to(device)
+
+        outputs = model(images)
+        loss = criterion(outputs, masks)
 
         optimizer.zero_grad()
-        outputs = model(imgs)['out']
-        loss = criterion(outputs, masks)
         loss.backward()
         optimizer.step()
-        total_train_loss += loss.item()
 
-    avg_train_loss = total_train_loss / len(train_loader)
+        train_loss += loss.item() * images.size(0)
 
+    avg_train_loss = train_loss / len(train_loader.dataset)
+
+    # Evaluate
     model.eval()
-    total_val_loss = 0
+    val_loss = 0.0
     with torch.no_grad():
-        for imgs, masks in val_loader:
-            imgs, masks = imgs.to("cuda"), masks.to("cuda")
-            outputs = model(imgs)['out']
+        for images, masks in val_loader:
+            images, masks = images.to(device), masks.to(device)
+
+            outputs = model(images)
             loss = criterion(outputs, masks)
-            total_val_loss += loss.item()
+            val_loss += loss.item() * images.size(0)
 
-    avg_val_loss = total_val_loss / len(val_loader)
+    avg_val_loss = val_loss / len(val_loader.dataset)
+    train_losses.append(avg_train_loss)
+    val_losses.append(avg_val_loss)
 
-    print(f"Epoch {epoch+1}: Train Loss = {avg_train_loss:.4f}, Val Loss = {avg_val_loss:.4f}")
+    if avg_val_loss < best_val_loss:
+        best_val_loss = avg_val_loss
+        torch.save(model.state_dict(), best_model_path)
+        print(f"Saved new best model at epoch {epoch+1} with val loss {best_val_loss:.4f}")
 
-torch.save(model.state_dict(), "building_segmentation.pth")
+    duration = time.time() - start
+    print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | duration: {duration:.2f}s")
+
+
+model.load_state_dict(torch.load(best_model_path))
+model.to(device)
+model.eval()
+
+with torch.no_grad():
+    images, masks = next(iter(val_loader))
+    images, masks = images.to(device), masks.to(device)
+
+    outputs = model(images)
+    preds = torch.argmax(outputs, dim=1)
+
+img = images[0].permute(1, 2, 0).cpu().numpy()
+mask = masks[0].cpu().numpy()
+pred = preds[0].cpu().numpy()
+
+# Loss plot
+plt.figure(figsize=(8,6))
+plt.plot(range(1, EPOCHS+1), train_losses, label="Training Loss")
+plt.plot(range(1, EPOCHS+1), val_losses, label="Validation Loss")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.title("Training vs Validation Loss")
+plt.ylim(0, .66)
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Images plot
+plt.figure(figsize=(12,4))
+plt.subplot(1,3,1)
+plt.title("Image")
+plt.imshow(img)
+
+plt.subplot(1,3,2)
+plt.title("Mask")
+plt.imshow(mask, cmap="gray")
+
+plt.subplot(1,3,3)
+plt.title("Prediction")
+plt.imshow(pred, cmap="gray")
+plt.show()
