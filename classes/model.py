@@ -6,9 +6,11 @@ class DoubleConv(nn.Module):
         super(DoubleConv, self).__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(out_channels),
+            nn.LeakyReLU(0.01, inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(out_channels),
+            nn.LeakyReLU(0.01, inplace=True),
         )
 
     def forward(self, x):
@@ -47,8 +49,10 @@ class UNet(nn.Module):
         self.down_convolution_3 = DownSample(128, 256)
         self.down_convolution_4 = DownSample(256, 512)
 
-        self.bottle_neck = DoubleConv(512, 1024)
-
+        self.bottle_neck = nn.Sequential(
+            DoubleConv(512, 1024),
+            nn.Dropout2d(0.5)
+        )
         self.up_convolution_1 = UpSample(1024, 512)
         self.up_convolution_2 = UpSample(512, 256)
         self.up_convolution_3 = UpSample(256, 128)

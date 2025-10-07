@@ -1,35 +1,40 @@
 import os
-from PIL import Image
+import random
+from PIL import Image, ImageOps
+from sklearn.model_selection import train_test_split
 
-INPUT_DIR = "dataset"
+INPUT_IMAGES = "dataset/images"
+INPUT_MASKS = "dataset/masks"
 OUTPUT_DIR = "dataset-768"
 SIZE = (768, 768)
+VAL_RATIO = 0.2
 
-def resize_and_save(input_path, output_path, size):
+def resize_and_save(input_path, output_path, size, is_mask=False):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with Image.open(input_path) as img:
-        if "masks" in input_path:
-            img = img.resize(size, Image.NEAREST)
-        else:
-            img = img.resize(size, Image.BILINEAR)
+        img = ImageOps.exif_transpose(img)
+        resample = Image.NEAREST if is_mask else Image.BILINEAR
+        img = img.resize(size, resample)
         img.save(output_path)
 
-def process_folder(subdir):
-    input_subdir = os.path.join(INPUT_DIR, subdir)
-    output_subdir = os.path.join(OUTPUT_DIR, subdir)
+def main():
+    images = sorted([f for f in os.listdir(INPUT_IMAGES) if f.lower().endswith((".jpg", ".png"))])
+    masks = sorted([f for f in os.listdir(INPUT_MASKS) if f.lower().endswith((".png"))])
 
-    for root, _, files in os.walk(input_subdir):
-        for fname in files:
-            if fname.lower().endswith((".jpg", ".png")):
-                input_path = os.path.join(root, fname)
-                relative = os.path.relpath(input_path, INPUT_DIR)
-                output_path = os.path.join(OUTPUT_DIR, relative)
-                resize_and_save(input_path, output_path, SIZE)
+    paired = [(os.path.join(INPUT_IMAGES, img), os.path.join(INPUT_MASKS, mask))
+              for img, mask in zip(images, masks)]
+
+    train, val = train_test_split(paired, test_size=VAL_RATIO)
+
+    for split_name, dataset in [("train", train), ("val", val)]:
+        for img_path, mask_path in dataset:
+            out_img = os.path.join(OUTPUT_DIR, "images", split_name, os.path.basename(img_path))
+            out_mask = os.path.join(OUTPUT_DIR, "masks", split_name, os.path.basename(mask_path))
+
+            resize_and_save(img_path, out_img, SIZE, is_mask=False)
+            resize_and_save(mask_path, out_mask, SIZE, is_mask=True)
+
+    print(f"✅ Done! Resized and split dataset saved to {OUTPUT_DIR}")
 
 if __name__ == "__main__":
-    process_folder("images/train")
-    process_folder("images/val")
-    process_folder("masks/train")
-    process_folder("masks/val")
-
-    print("✅ Resizing complete! Saved in:", OUTPUT_DIR)
+    main()
