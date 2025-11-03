@@ -10,7 +10,7 @@ from classes.model import UNet
 
 IMAGE_DIR = "C:/Users/piotr/Downloads/test"
 BATCH_SIZE = 1
-best_model_path = "models/unet_best.pth"
+best_model_path = "models/latest-768.pth"
 IMAGE_SIZE = (768, 768)
 
 def denormalize(tensor, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
@@ -55,17 +55,36 @@ os.makedirs("predictions", exist_ok=True)
 
 with torch.no_grad():
     for images, filenames in loader:
+        # images: [batch_size, 3, h, w]
+
         images = images.to(device)
         outputs = model(images)
-        preds = torch.argmax(outputs, dim=1)
+
+        probs = torch.softmax(outputs, dim=1)
+        probs[probs < 0.9] = 0
+
+        preds = torch.argmax(probs, dim=1)
+
         for i in range(images.size(0)):
+
             img = denormalize(images[i])
             pred = preds[i].cpu().numpy()
-            pred_path = os.path.join("predictions", f"{filenames[i]}_pred.png")
-            # plt.imsave(pred_path, pred, cmap="gray")
-            # print(f"Saving prediction to {pred_path}")
-            plt.figure(figsize=(8,4))
-            plt.subplot(1,2,1); plt.imshow(img); plt.title("Image")
-            plt.subplot(1,2,2); plt.imshow(pred, cmap="gray"); plt.title("Prediction")
+            prob_map = probs[i, 1].cpu().numpy()
+
+
+            plt.figure(figsize=(15, 4))
+            plt.subplot(1, 3, 1)
+            plt.imshow(img)
+            plt.title("Image")
+
+            plt.subplot(1, 3, 2)
+            plt.imshow(pred, cmap="gray")
+            plt.title("Prediction")
+
+            plt.subplot(1, 3, 3)
+            plt.imshow(prob_map, cmap="jet")
+            plt.title(f"Probability map")
+
             plt.suptitle(filenames[i])
+            plt.tight_layout()
             plt.show()

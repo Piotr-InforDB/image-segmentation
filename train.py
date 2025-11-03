@@ -16,9 +16,9 @@ from classes.model import UNet
 import torch.nn.functional as F
 
 
-EPOCHS = 200
+EPOCHS = 100
 BATCH_SIZE = 4
-DATASET_DIR = "dataset-768"
+DATASET_DIR = "dataset-512"
 
 #Augmentation
 train_transform = A.Compose([
@@ -84,7 +84,6 @@ class DiceLoss(nn.Module):
 
         return 1 - torch.stack(dice_scores).mean()
 
-
 class CombinedLoss(nn.Module):
     def __init__(self, alpha=0.5):
         super().__init__()
@@ -95,6 +94,23 @@ class CombinedLoss(nn.Module):
     def forward(self, pred, target):
         return self.alpha * self.ce(pred, target) + (1 - self.alpha) * self.dice(pred, target)
 
+def compute_iou(preds, masks, num_classes=2):
+    preds = preds.view(-1)
+    masks = masks.view(-1)
+
+    ious = []
+    for cls in range(num_classes):
+        pred_inds = preds == cls
+        target_inds = masks == cls
+
+        intersection = (pred_inds & target_inds).sum().item()
+        union = (pred_inds | target_inds).sum().item()
+
+        if union == 0:
+            ious.append(float('nan'))
+        else:
+            ious.append(intersection / union)
+    return np.nanmean(ious)
 
 criterion = CombinedLoss()
 
@@ -109,6 +125,7 @@ best_model_path = "models/unet_best.pth"
 
 train_losses = []
 val_losses = []
+val_ious = []
 
 # Train
 print("Training...")
@@ -134,15 +151,23 @@ for epoch in range(EPOCHS):
     # Evaluate
     model.eval()
     val_loss = 0.0
+    val_iou = 0.0
+
     with torch.no_grad():
         for images, masks in val_loader:
             images, masks = images.to(device), masks.to(device)
-
             outputs = model(images)
+            preds = torch.argmax(outputs, dim=1)
+
             loss = criterion(outputs, masks)
+            batch_iou = compute_iou(preds, masks, num_classes=2)
+
+            val_iou += batch_iou * images.size(0)
             val_loss += loss.item() * images.size(0)
 
     avg_val_loss = val_loss / len(val_loader.dataset)
+    avg_val_iou = val_iou / len(val_loader.dataset)
+    val_ious.append(avg_val_iou)
     train_losses.append(avg_train_loss)
     val_losses.append(avg_val_loss)
 
@@ -154,7 +179,7 @@ for epoch in range(EPOCHS):
         print(f"Saved new best model at epoch {epoch+1} with val loss {best_val_loss:.4f}")
 
     duration = time.time() - start
-    print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | lr: {optimizer.param_groups[0]['lr']:.6f} | duration: {duration:.2f}s")
+    print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | Val IoU: {avg_val_iou:.4f} | lr: {optimizer.param_groups[0]['lr']:.6f} | duration: {duration:.2f}s")
 
 
 model.load_state_dict(torch.load(best_model_path))
@@ -171,6 +196,16 @@ with torch.no_grad():
 img = images[0].permute(1, 2, 0).cpu().numpy()
 mask = masks[0].cpu().numpy()
 pred = preds[0].cpu().numpy()
+
+# IoU plot
+plt.figure(figsize=(8,6))
+plt.plot(range(1, EPOCHS+1), val_ious, label="Validation IoU", color="green")
+plt.xlabel("Epoch")
+plt.ylabel("IoU")
+plt.title("Validation IoU over epochs")
+plt.grid(True)
+plt.legend()
+plt.show()
 
 # Loss plot
 plt.figure(figsize=(8,6))

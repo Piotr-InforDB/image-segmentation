@@ -13,7 +13,7 @@ from PIL import Image
 
 
 IMAGE_SIZE = (768, 768)
-MODEL_PATH = "models/unet_best.pth"
+MODEL_PATH = "models/latest-768.pth"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model = UNet(n_classes=2).to(DEVICE)
