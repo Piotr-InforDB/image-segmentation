@@ -7,20 +7,27 @@ import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from classes.dataset import Data
 from classes.model import UNet
-import torch.nn.functional as F
 
 
-EPOCHS = 500
-BATCH_SIZE = 4
-DATASET_DIR = "dataset-prepared"
+# ----------------------------
+# CONFIG
+# ----------------------------
+EPOCHS = 100
+BATCH_SIZE = 2
+DATASET_DIR = "dataset-768"
+BEST_MODEL_PATH = "models/unet_best_iou.pth"
 
-#Augmentation
+
+# ----------------------------
+# AUGMENTATION
+# ----------------------------
 train_transform = A.Compose([
     A.HorizontalFlip(p=0.5),
     A.VerticalFlip(p=0.5),
@@ -36,13 +43,16 @@ train_transform = A.Compose([
     A.Normalize(),
     ToTensorV2()
 ])
+
 val_transform = A.Compose([
     A.Normalize(),
     ToTensorV2()
 ])
 
 
-# Define Data
+# ----------------------------
+# DATASET
+# ----------------------------
 train_dataset = Data(
     image_dir=f"{DATASET_DIR}/images/train",
     mask_dir=f"{DATASET_DIR}/masks/train",
@@ -52,18 +62,22 @@ val_dataset = Data(
     image_dir=f"{DATASET_DIR}/images/val",
     mask_dir=f"{DATASET_DIR}/masks/val",
     transform=val_transform
-
 )
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
 
-# Define Model
-model = UNet(n_classes=2)
+
+# ----------------------------
+# MODEL
+# ----------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = model.to(device)
+model = UNet(n_classes=2).to(device)
 
 
+# ----------------------------
+# LOSSES
+# ----------------------------
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1):
         super().__init__()
@@ -71,7 +85,6 @@ class DiceLoss(nn.Module):
 
     def forward(self, pred, target):
         pred = F.softmax(pred, dim=1)
-
         target_one_hot = F.one_hot(target, num_classes=pred.size(1)).permute(0, 3, 1, 2).float()
 
         dice_scores = []
@@ -79,10 +92,14 @@ class DiceLoss(nn.Module):
             pred_flat = pred[:, i].contiguous().view(-1)
             target_flat = target_one_hot[:, i].contiguous().view(-1)
             intersection = (pred_flat * target_flat).sum()
-            dice = (2. * intersection + self.smooth) / (pred_flat.sum() + target_flat.sum() + self.smooth)
+
+            dice = (2 * intersection + self.smooth) / \
+                   (pred_flat.sum() + target_flat.sum() + self.smooth)
+
             dice_scores.append(dice)
 
         return 1 - torch.stack(dice_scores).mean()
+
 
 class CombinedLoss(nn.Module):
     def __init__(self, alpha=0.5):
@@ -94,55 +111,67 @@ class CombinedLoss(nn.Module):
     def forward(self, pred, target):
         return self.alpha * self.ce(pred, target) + (1 - self.alpha) * self.dice(pred, target)
 
+
+criterion = CombinedLoss()
+
+
+# ----------------------------
+# METRICS
+# ----------------------------
 def compute_iou(preds, masks, num_classes=2):
     preds = preds.view(-1)
     masks = masks.view(-1)
 
     ious = []
-
-    # Only for classes > 0
-    for cls in range(1, num_classes):
+    for cls in range(num_classes):
         pred_inds = preds == cls
         target_inds = masks == cls
-
-        # Skip if the ground truth doesn't contain this class
-        if target_inds.sum().item() == 0:
-            continue
 
         intersection = (pred_inds & target_inds).sum().item()
         union = (pred_inds | target_inds).sum().item()
 
-        # If GT has class pixels, union can NEVER be 0 here
-        ious.append(intersection / union)
+        if union == 0:
+            ious.append(float('nan'))
+        else:
+            ious.append(intersection / union)
 
-    # If no classes were present in ANY image → IoU meaningless
-    return float(np.mean(ious)) if ious else 1.0
+    return np.nanmean(ious)
 
-criterion = CombinedLoss()
 
-# criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+# ----------------------------
+# OPTIMIZER + SCHEDULER
+# ----------------------------
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+# scheduler tries to MAXIMIZE IoU → we pass negative IoU
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.75, patience=5
+    optimizer, mode="min", factor=0.75, patience=10
 )
 
-best_val_iou = 0
-best_model_path = "models/unet_best.pth"
+
+# ----------------------------
+# TRAINING
+# ----------------------------
+print("Training...")
+
+best_val_iou = 0.0
 
 train_losses = []
 val_losses = []
+train_ious = []
 val_ious = []
 
-# Train
-print("Training...")
 for epoch in range(EPOCHS):
     start = time.time()
 
-    # Training
+    # ----- TRAIN -----
     model.train()
-    train_loss = 0.0
-    for images, masks in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS} [Train]", leave=False):
+    train_loss = 0
+    train_iou = 0
+
+    for images, masks in tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [Train]", leave=False):
         images, masks = images.to(device), masks.to(device)
+
         outputs = model(images)
         loss = criterion(outputs, masks)
 
@@ -152,90 +181,86 @@ for epoch in range(EPOCHS):
 
         train_loss += loss.item() * images.size(0)
 
-    avg_train_loss = train_loss / len(train_loader.dataset)
+        # IoU metric
+        preds = torch.argmax(outputs, dim=1)
+        train_iou += compute_iou(preds, masks) * images.size(0)
 
-    # Evaluate
+    avg_train_loss = train_loss / len(train_loader.dataset)
+    avg_train_iou = train_iou / len(train_loader.dataset)
+
+
+    # ----- VALIDATION -----
     model.eval()
-    val_loss = 0.0
-    val_iou = 0.0
+    val_loss = 0
+    val_iou = 0
 
     with torch.no_grad():
         for images, masks in val_loader:
             images, masks = images.to(device), masks.to(device)
             outputs = model(images)
-            preds = torch.argmax(outputs, dim=1)
 
             loss = criterion(outputs, masks)
-            batch_iou = compute_iou(preds, masks, num_classes=2)
+            preds = torch.argmax(outputs, dim=1)
 
-            val_iou += batch_iou * images.size(0)
             val_loss += loss.item() * images.size(0)
+            val_iou += compute_iou(preds, masks) * images.size(0)
 
     avg_val_loss = val_loss / len(val_loader.dataset)
     avg_val_iou = val_iou / len(val_loader.dataset)
-    val_ious.append(avg_val_iou)
+
+
+    # Save metrics
     train_losses.append(avg_train_loss)
     val_losses.append(avg_val_loss)
+    train_ious.append(avg_train_iou)
+    val_ious.append(avg_val_iou)
 
-    scheduler.step(avg_val_loss)
-
+    # IoU is the PRIMARY metric
     if avg_val_iou > best_val_iou:
         best_val_iou = avg_val_iou
-        torch.save(model.state_dict(), best_model_path)
-        print(f"Saved new best model at epoch {epoch+1} with val IoU {best_val_iou:.4f}")
+        torch.save(model.state_dict(), BEST_MODEL_PATH)
+        print(f"New best model saved at epoch {epoch+1} | IoU={best_val_iou:.4f}")
+
+    # scheduler wants a decreasing metric → we invert IoU
+    scheduler.step(1 - avg_val_iou)
 
     duration = time.time() - start
-    print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | Val IoU: {avg_val_iou:.4f} | lr: {optimizer.param_groups[0]['lr']:.6f} | duration: {duration:.2f}s")
+    print(
+        f"Epoch {epoch+1}/{EPOCHS} | "
+        f"Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | "
+        f"Train IoU: {avg_train_iou:.4f} | Val IoU: {avg_val_iou:.4f} | "
+        f"lr: {optimizer.param_groups[0]['lr']:.6f} | {duration:.1f}s"
+    )
 
 
-model.load_state_dict(torch.load(best_model_path))
+# ----------------------------
+# LOAD BEST MODEL
+# ----------------------------
+model.load_state_dict(torch.load(BEST_MODEL_PATH))
 model.to(device)
 model.eval()
 
-with torch.no_grad():
-    images, masks = next(iter(val_loader))
-    images, masks = images.to(device), masks.to(device)
 
-    outputs = model(images)
-    preds = torch.argmax(outputs, dim=1)
-
-img = images[0].permute(1, 2, 0).cpu().numpy()
-mask = masks[0].cpu().numpy()
-pred = preds[0].cpu().numpy()
-
-# IoU plot
-plt.figure(figsize=(8,6))
-plt.plot(range(1, EPOCHS+1), val_ious, label="Validation IoU", color="green")
+# ----------------------------
+# PLOTS
+# ----------------------------
+# IoU
+plt.figure(figsize=(8, 5))
+plt.plot(val_ious, label="Validation IoU")
+plt.plot(train_ious, label="Training IoU")
 plt.xlabel("Epoch")
 plt.ylabel("IoU")
-plt.title("Validation IoU over epochs")
+plt.title("IoU over epochs")
 plt.grid(True)
 plt.legend()
 plt.show()
 
-# Loss plot
-plt.figure(figsize=(8,6))
-plt.plot(range(1, EPOCHS+1), train_losses, label="Training Loss")
-plt.plot(range(1, EPOCHS+1), val_losses, label="Validation Loss")
+# Loss
+plt.figure(figsize=(8, 5))
+plt.plot(train_losses, label="Training Loss")
+plt.plot(val_losses, label="Validation Loss")
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
-plt.title("Training vs Validation Loss")
-plt.ylim(0, .66)
-plt.legend()
+plt.title("Loss over epochs")
 plt.grid(True)
-plt.show()
-
-# Images plot
-plt.figure(figsize=(12,4))
-plt.subplot(1,3,1)
-plt.title("Image")
-plt.imshow(img)
-
-plt.subplot(1,3,2)
-plt.title("Mask")
-plt.imshow(mask, cmap="gray")
-
-plt.subplot(1,3,3)
-plt.title("Prediction")
-plt.imshow(pred, cmap="gray")
 plt.show()

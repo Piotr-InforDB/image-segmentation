@@ -7,3 +7,5 @@
 /predictions/
 .idea
 /sam_models/
+/dataset-prepared/
+/dataset-test/

@@ -3,27 +3,26 @@ from PIL import Image
 import numpy as np
 
 # Paths
-input_root = "dataset_rooftops/masks"
-output_root = "dataset_rooftops/masks_red"
+input_root = "dataset/masks"
+output_root = "dataset/masks_red"
+
+color_from = np.array([128, 0, 0])
+color_to   = np.array([255, 0, 0])
 
 os.makedirs(output_root, exist_ok=True)
 
-for split in ["train", "val"]:
-    input_dir = os.path.join(input_root, split)
-    output_dir = os.path.join(output_root, split)
-    os.makedirs(output_dir, exist_ok=True)
+os.makedirs(output_root, exist_ok=True)
 
-    for file in os.listdir(input_dir):
-        if file.endswith(".png") or file.endswith(".jpg"):
-            path = os.path.join(input_dir, file)
-            mask = Image.open(path).convert("L")  # grayscale
+for file in os.listdir(input_root):
+    if file.endswith(".png") or file.endswith(".jpg"):
+        path = os.path.join(input_root, file)
+        mask = Image.open(path).convert("RGB")
+        mask_arr = np.array(mask)
 
-            mask_arr = np.array(mask)
+        match = np.all(mask_arr == color_from, axis=-1)
+        mask_arr[match] = color_to
 
-            rgb = np.zeros((mask_arr.shape[0], mask_arr.shape[1], 3), dtype=np.uint8)
-            rgb[mask_arr > 127] = [255, 0, 0]
-
-            out = Image.fromarray(rgb)
-            out.save(os.path.join(output_dir, file))
+        out = Image.fromarray(mask_arr)
+        out.save(os.path.join(output_root, file))
 
 print("✅ Conversion complete. Red masks saved in dataset_rooftop/masks_red/")

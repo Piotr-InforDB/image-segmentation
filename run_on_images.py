@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import cv2
 import numpy as np
@@ -8,10 +9,11 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from classes.model import UNet
 
-IMAGE_DIR = "C:/Users/piotr/Downloads/test"
+IMAGE_DIR = "C:/Users/piotr/Documents/DroneMissions/DCIM/DJI_202503200912_003_FriedeseMolen3D"
 BATCH_SIZE = 1
-best_model_path = "models/latest-768.pth"
-IMAGE_SIZE = (768, 768)
+best_model_path = "models/unet_best.pth"
+IMAGE_SIZE = (512, 512)
+THRESHOLD = 0.5
 
 def denormalize(tensor, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
     img = tensor.clone().cpu().numpy()
@@ -58,10 +60,15 @@ with torch.no_grad():
         # images: [batch_size, 3, h, w]
 
         images = images.to(device)
+
+        #measure time
+        start = time.time()
         outputs = model(images)
+        end = time.time()
+        print(f"Time: {end - start:.2f}s")
 
         probs = torch.softmax(outputs, dim=1)
-        probs[probs < 0.9] = 0
+        probs[probs < THRESHOLD] = 0
 
         preds = torch.argmax(probs, dim=1)
 

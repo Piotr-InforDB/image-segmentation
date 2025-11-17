@@ -11,10 +11,10 @@ import numpy as np
 from classes.dataset import Data
 from classes.model import UNet
 
-DATASET_DIR = "dataset-768"
+DATASET_DIR = "dataset-2048-sliced"
 BATCH_SIZE = 1
 best_model_path = "models/unet_best.pth"
-IMAGE_SIZE = (768, 768)
+IMAGE_SIZE = (512, 512)
 
 def denormalize(tensor, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
     img = tensor.clone().cpu().numpy()

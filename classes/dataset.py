@@ -18,9 +18,9 @@ class Data(Dataset):
         mask_path = os.path.join(self.mask_dir, self.masks[idx])
         mask_rgb = np.array(Image.open(mask_path).convert("RGB"))
 
-        red_threshold = (mask_rgb[:, :, 0] > 100) & \
-                        (mask_rgb[:, :, 1] < 100) & \
-                        (mask_rgb[:, :, 2] < 100)
+        red_threshold = (mask_rgb[:, :, 0] == 128) & \
+                        (mask_rgb[:, :, 1] == 0) & \
+                        (mask_rgb[:, :, 2] == 0)
         mask = np.zeros((mask_rgb.shape[0], mask_rgb.shape[1]), dtype=np.uint8)
         mask[red_threshold] = 1
 

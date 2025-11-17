@@ -5,10 +5,10 @@ from sklearn.model_selection import train_test_split
 
 INPUT_IMAGES = "dataset/images"
 INPUT_MASKS = "dataset/masks"
-OUTPUT_DIR = "dataset-512"
-SIZE = (512, 512)
+OUTPUT_DIR = "dataset-2048"
+SIZE = (2048, 2048)
 VAL_RATIO = 0.2
-MAX_IMAGES = 100
+MAX_IMAGES = 99999
 
 def resize_and_save(input_path, output_path, size, is_mask=False):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
