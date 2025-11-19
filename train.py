@@ -12,13 +12,12 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from classes.dataset import Data
-from classes.model import UNet
 import torch.nn.functional as F
+from classes.model_deeplabv3 import DeepLabV3Plus
 
-
-EPOCHS = 500
-BATCH_SIZE = 4
-DATASET_DIR = "dataset-prepared"
+EPOCHS = 100
+BATCH_SIZE = 1
+DATASET_DIR = "dataset-1280-8S"
 
 #Augmentation
 train_transform = A.Compose([
@@ -59,7 +58,7 @@ train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
 
 # Define Model
-model = UNet(n_classes=2)
+model = DeepLabV3Plus(n_classes=2)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
 
@@ -123,11 +122,11 @@ criterion = CombinedLoss()
 # criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.75, patience=5
+    optimizer, mode='min', factor=0.75, patience=10
 )
 
 best_val_iou = 0
-best_model_path = "models/unet_best.pth"
+best_model_path = "models/checkpoint.pth"
 
 train_losses = []
 val_losses = []
@@ -181,14 +180,20 @@ for epoch in range(EPOCHS):
 
     if avg_val_iou > best_val_iou:
         best_val_iou = avg_val_iou
-        torch.save(model.state_dict(), best_model_path)
+        torch.save({
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "epoch": epoch,
+            "best_val_iou": best_val_iou
+        }, best_model_path)
         print(f"Saved new best model at epoch {epoch+1} with val IoU {best_val_iou:.4f}")
 
     duration = time.time() - start
     print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | Val IoU: {avg_val_iou:.4f} | lr: {optimizer.param_groups[0]['lr']:.6f} | duration: {duration:.2f}s")
 
 
-model.load_state_dict(torch.load(best_model_path))
+checkpoint = torch.load(best_model_path, map_location=device)
+model.load_state_dict(checkpoint["model"])
 model.to(device)
 model.eval()
 

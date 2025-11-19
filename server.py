@@ -9,15 +9,17 @@ from pydantic import BaseModel
 from albumentations.pytorch import ToTensorV2
 import albumentations as A
 from classes.model import UNet
+from classes.model_deeplabv3 import DeepLabV3Plus
 from PIL import Image
 
 
-IMAGE_SIZE = (768, 768)
-MODEL_PATH = "models/latest-768.pth"
+IMAGE_SIZE = (1280, 1280)
+MODEL_PATH = "models/checkpoint_best.pth"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-model = UNet(n_classes=2).to(DEVICE)
-model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+model = DeepLabV3Plus(n_classes=2, groupnorm=False).to(DEVICE)
+checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
+model.load_state_dict(checkpoint["model"])
 model.eval()
 
 transform = A.Compose([

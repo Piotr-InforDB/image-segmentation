@@ -8,11 +8,13 @@ from torch.utils.data import Dataset, DataLoader
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from classes.model import UNet
+from classes.model_deeplabv3 import DeepLabV3Plus
+from classes.model_unetpp import UNetPP
 
-IMAGE_DIR = "C:/Users/piotr/Documents/DroneMissions/DCIM/DJI_202503200912_003_FriedeseMolen3D"
+IMAGE_DIR = "C:/Users/piotr/Documents/DroneMissions/Gennep/DJI_202508201135_010_blok6"
 BATCH_SIZE = 1
-best_model_path = "models/unet_best.pth"
-IMAGE_SIZE = (512, 512)
+best_model_path = "models/checkpoint_best.pth"
+IMAGE_SIZE = (1280, 1280)
 THRESHOLD = 0.5
 
 def denormalize(tensor, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
@@ -49,8 +51,9 @@ dataset = InferenceDataset(IMAGE_DIR, transform=transform)
 loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = UNet(n_classes=2).to(device)
-model.load_state_dict(torch.load(best_model_path, map_location=device))
+model = DeepLabV3Plus(n_classes=2).to(device)
+checkpoint = torch.load(best_model_path, map_location=device)
+model.load_state_dict(checkpoint["model"])
 model.eval()
 
 os.makedirs("predictions", exist_ok=True)
