@@ -2,13 +2,9 @@ import os
 from PIL import Image
 
 
-# ==========================================
-# GLOBAL PARAMETERS
-# ==========================================
 INPUT_DIR = "dataset-2048"
 OUTPUT_DIR = "dataset-2048-sliced"
 SLICES = 2
-# ==========================================
 
 
 def slice_image(img_path, out_path, slices):

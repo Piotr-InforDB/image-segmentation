@@ -12,7 +12,6 @@ from classes.model import UNet
 from classes.model_deeplabv3 import DeepLabV3Plus
 from PIL import Image
 
-
 IMAGE_SIZE = (1280, 1280)
 MODEL_PATH = "models/checkpoint_best.pth"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -39,6 +38,7 @@ app.add_middleware(
 
 class ImagePayload(BaseModel):
     image: str
+    threshold: float = 0.7
 
 def decode_base64_image(data: str):
     if data.startswith("data:image"):
@@ -62,7 +62,13 @@ def predict(payload: ImagePayload):
 
     with torch.no_grad():
         output = model(transformed)
-        pred = torch.argmax(output, dim=1).squeeze().cpu().numpy().astype(np.uint8) * 255
+        probs = torch.softmax(output, dim=1)
+
+        # Apply threshold to positive class (class 1)
+        pred = torch.zeros_like(probs[:, 1])
+        pred[probs[:, 1] > payload.threshold] = 1
+
+        pred = pred.squeeze().cpu().numpy().astype(np.uint8) * 255
 
     pred_b64 = encode_base64_image(pred)
     return {"prediction": pred_b64}

@@ -16,18 +16,12 @@ from classes.dataset import Data
 from classes.model import UNet
 
 
-# ----------------------------
-# CONFIG
-# ----------------------------
 EPOCHS = 100
 BATCH_SIZE = 2
 DATASET_DIR = "dataset-768"
 BEST_MODEL_PATH = "models/unet_best_iou.pth"
 
 
-# ----------------------------
-# AUGMENTATION
-# ----------------------------
 train_transform = A.Compose([
     A.HorizontalFlip(p=0.5),
     A.VerticalFlip(p=0.5),
@@ -50,9 +44,6 @@ val_transform = A.Compose([
 ])
 
 
-# ----------------------------
-# DATASET
-# ----------------------------
 train_dataset = Data(
     image_dir=f"{DATASET_DIR}/images/train",
     mask_dir=f"{DATASET_DIR}/masks/train",
@@ -68,16 +59,10 @@ train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
 
 
-# ----------------------------
-# MODEL
-# ----------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = UNet(n_classes=2).to(device)
 
 
-# ----------------------------
-# LOSSES
-# ----------------------------
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1):
         super().__init__()
@@ -115,9 +100,6 @@ class CombinedLoss(nn.Module):
 criterion = CombinedLoss()
 
 
-# ----------------------------
-# METRICS
-# ----------------------------
 def compute_iou(preds, masks, num_classes=2):
     preds = preds.view(-1)
     masks = masks.view(-1)
@@ -138,9 +120,6 @@ def compute_iou(preds, masks, num_classes=2):
     return np.nanmean(ious)
 
 
-# ----------------------------
-# OPTIMIZER + SCHEDULER
-# ----------------------------
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
 # scheduler tries to MAXIMIZE IoU → we pass negative IoU
@@ -149,9 +128,6 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
 )
 
 
-# ----------------------------
-# TRAINING
-# ----------------------------
 print("Training...")
 
 best_val_iou = 0.0
@@ -164,7 +140,6 @@ val_ious = []
 for epoch in range(EPOCHS):
     start = time.time()
 
-    # ----- TRAIN -----
     model.train()
     train_loss = 0
     train_iou = 0
@@ -189,7 +164,6 @@ for epoch in range(EPOCHS):
     avg_train_iou = train_iou / len(train_loader.dataset)
 
 
-    # ----- VALIDATION -----
     model.eval()
     val_loss = 0
     val_iou = 0
@@ -209,19 +183,16 @@ for epoch in range(EPOCHS):
     avg_val_iou = val_iou / len(val_loader.dataset)
 
 
-    # Save metrics
     train_losses.append(avg_train_loss)
     val_losses.append(avg_val_loss)
     train_ious.append(avg_train_iou)
     val_ious.append(avg_val_iou)
 
-    # IoU is the PRIMARY metric
     if avg_val_iou > best_val_iou:
         best_val_iou = avg_val_iou
         torch.save(model.state_dict(), BEST_MODEL_PATH)
         print(f"New best model saved at epoch {epoch+1} | IoU={best_val_iou:.4f}")
 
-    # scheduler wants a decreasing metric → we invert IoU
     scheduler.step(1 - avg_val_iou)
 
     duration = time.time() - start
@@ -233,18 +204,11 @@ for epoch in range(EPOCHS):
     )
 
 
-# ----------------------------
-# LOAD BEST MODEL
-# ----------------------------
 model.load_state_dict(torch.load(BEST_MODEL_PATH))
 model.to(device)
 model.eval()
 
 
-# ----------------------------
-# PLOTS
-# ----------------------------
-# IoU
 plt.figure(figsize=(8, 5))
 plt.plot(val_ious, label="Validation IoU")
 plt.plot(train_ious, label="Training IoU")
@@ -255,7 +219,6 @@ plt.grid(True)
 plt.legend()
 plt.show()
 
-# Loss
 plt.figure(figsize=(8, 5))
 plt.plot(train_losses, label="Training Loss")
 plt.plot(val_losses, label="Validation Loss")

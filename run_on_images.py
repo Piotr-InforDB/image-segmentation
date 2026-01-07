@@ -10,10 +10,13 @@ from albumentations.pytorch import ToTensorV2
 from classes.model import UNet
 from classes.model_deeplabv3 import DeepLabV3Plus
 from classes.model_unetpp import UNetPP
+from PIL import Image
+
 
 IMAGE_DIR = "C:/Users/piotr/Documents/DroneMissions/Gennep/DJI_202508201135_010_blok6"
+# IMAGE_DIR = "C:/Users/piotr/Documents/Repos/images"
 BATCH_SIZE = 1
-best_model_path = "models/checkpoint_best.pth"
+best_model_path = "models/checkpoint.pth"
 IMAGE_SIZE = (1280, 1280)
 THRESHOLD = 0.5
 
@@ -80,6 +83,10 @@ with torch.no_grad():
             img = denormalize(images[i])
             pred = preds[i].cpu().numpy()
             prob_map = probs[i, 1].cpu().numpy()
+
+            # pred_u8 = (pred.astype(np.uint8) * 255)
+            # im = Image.fromarray(pred_u8, mode="L")
+            # im.save(f"prediction_{i}.png")
 
 
             plt.figure(figsize=(15, 4))

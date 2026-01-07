@@ -4,9 +4,11 @@ from tqdm import tqdm
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
+import os
 
 import torch
 import torch.nn as nn
+from torch.amp import autocast, GradScaler
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -15,11 +17,15 @@ from classes.dataset import Data
 import torch.nn.functional as F
 from classes.model_deeplabv3 import DeepLabV3Plus
 
+RESUME_FROM = None
+# RESUME_FROM = 'models/checkpoint-1280-8s.pth'
 EPOCHS = 100
-BATCH_SIZE = 1
-DATASET_DIR = "dataset-1280-8S"
+BATCH_SIZE = 2
+DATASET_DIR = "dataset-768-2S"
+SAVE_DIR = "models"
 
-#Augmentation
+os.makedirs(SAVE_DIR, exist_ok=True)
+
 train_transform = A.Compose([
     A.HorizontalFlip(p=0.5),
     A.VerticalFlip(p=0.5),
@@ -40,8 +46,6 @@ val_transform = A.Compose([
     ToTensorV2()
 ])
 
-
-# Define Data
 train_dataset = Data(
     image_dir=f"{DATASET_DIR}/images/train",
     mask_dir=f"{DATASET_DIR}/masks/train",
@@ -57,7 +61,6 @@ val_dataset = Data(
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
 
-# Define Model
 model = DeepLabV3Plus(n_classes=2)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
@@ -83,6 +86,7 @@ class DiceLoss(nn.Module):
 
         return 1 - torch.stack(dice_scores).mean()
 
+
 class CombinedLoss(nn.Module):
     def __init__(self, alpha=0.5):
         super().__init__()
@@ -92,6 +96,7 @@ class CombinedLoss(nn.Module):
 
     def forward(self, pred, target):
         return self.alpha * self.ce(pred, target) + (1 - self.alpha) * self.dice(pred, target)
+
 
 def compute_iou(preds, masks, num_classes=2):
     preds = preds.view(-1)
@@ -104,67 +109,94 @@ def compute_iou(preds, masks, num_classes=2):
         pred_inds = preds == cls
         target_inds = masks == cls
 
-        # Skip if the ground truth doesn't contain this class
-        if target_inds.sum().item() == 0:
-            continue
-
         intersection = (pred_inds & target_inds).sum().item()
         union = (pred_inds | target_inds).sum().item()
 
-        # If GT has class pixels, union can NEVER be 0 here
-        ious.append(intersection / union)
+        if union > 0:
+            ious.append(intersection / union)
 
-    # If no classes were present in ANY image → IoU meaningless
-    return float(np.mean(ious)) if ious else 1.0
+    return float(np.mean(ious)) if ious else 0.0
+
 
 criterion = CombinedLoss()
-
-# criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, mode='min', factor=0.75, patience=10
 )
 
-best_val_iou = 0
-best_model_path = "models/checkpoint.pth"
+scaler = GradScaler('cuda')
 
+start_epoch = 0
+best_val_iou = 0
 train_losses = []
 val_losses = []
 val_ious = []
+best_model_path = os.path.join(SAVE_DIR, "checkpoint.pth")
 
-# Train
+if RESUME_FROM and os.path.exists(RESUME_FROM):
+    print(f"Resuming training from: {RESUME_FROM}")
+    checkpoint = torch.load(RESUME_FROM, map_location=device)
+
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    start_epoch = checkpoint["epoch"] + 1
+    best_val_iou = checkpoint["best_val_iou"]
+
+    # Load scaler state if available
+    if "scaler" in checkpoint:
+        scaler.load_state_dict(checkpoint["scaler"])
+
+    # Load training history if available
+    if "train_losses" in checkpoint:
+        train_losses = checkpoint["train_losses"]
+        val_losses = checkpoint["val_losses"]
+        val_ious = checkpoint["val_ious"]
+
+    print(f"Resuming from epoch {start_epoch} with best IoU: {best_val_iou:.4f}")
+else:
+    print("Starting training from scratch...")
+
 print("Training...")
-for epoch in range(EPOCHS):
+for epoch in range(start_epoch, EPOCHS):
     start = time.time()
 
-    # Training
     model.train()
     train_loss = 0.0
     for images, masks in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS} [Train]", leave=False):
         images, masks = images.to(device), masks.to(device)
-        outputs = model(images)
-        loss = criterion(outputs, masks)
 
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+
+        with autocast('cuda'):
+            outputs = model(images)
+            loss = criterion(outputs, masks)
+
+        scaler.scale(loss).backward()
+
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+        scaler.step(optimizer)
+        scaler.update()
 
         train_loss += loss.item() * images.size(0)
 
     avg_train_loss = train_loss / len(train_loader.dataset)
 
-    # Evaluate
     model.eval()
     val_loss = 0.0
     val_iou = 0.0
 
     with torch.no_grad():
-        for images, masks in val_loader:
+        for images, masks in tqdm(val_loader, desc=f"Epoch {epoch + 1}/{EPOCHS} [Val]", leave=False):
             images, masks = images.to(device), masks.to(device)
-            outputs = model(images)
-            preds = torch.argmax(outputs, dim=1)
 
-            loss = criterion(outputs, masks)
+            # Use mixed precision for validation too
+            with autocast('cuda'):
+                outputs = model(images)
+                loss = criterion(outputs, masks)
+
+            preds = torch.argmax(outputs, dim=1)
             batch_iou = compute_iou(preds, masks, num_classes=2)
 
             val_iou += batch_iou * images.size(0)
@@ -183,15 +215,26 @@ for epoch in range(EPOCHS):
         torch.save({
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "scaler": scaler.state_dict(),
             "epoch": epoch,
-            "best_val_iou": best_val_iou
+            "best_val_iou": best_val_iou,
+            "train_losses": train_losses,
+            "val_losses": val_losses,
+            "val_ious": val_ious
         }, best_model_path)
-        print(f"Saved new best model at epoch {epoch+1} with val IoU {best_val_iou:.4f}")
+        print(f"✓ Saved new best model at epoch {epoch + 1} with val IoU {best_val_iou:.4f}")
 
     duration = time.time() - start
-    print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | Val IoU: {avg_val_iou:.4f} | lr: {optimizer.param_groups[0]['lr']:.6f} | duration: {duration:.2f}s")
+    print(
+        f"Epoch {epoch + 1}/{EPOCHS} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | Val IoU: {avg_val_iou:.4f} | lr: {optimizer.param_groups[0]['lr']:.6f} | duration: {duration:.2f}s")
 
+# Save training history
+np.savez(os.path.join(SAVE_DIR, 'training_history.npz'),
+         train_losses=train_losses,
+         val_losses=val_losses,
+         val_ious=val_ious)
 
+# Load best model for visualization
 checkpoint = torch.load(best_model_path, map_location=device)
 model.load_state_dict(checkpoint["model"])
 model.to(device)
@@ -205,42 +248,57 @@ with torch.no_grad():
     preds = torch.argmax(outputs, dim=1)
 
 img = images[0].permute(1, 2, 0).cpu().numpy()
+# Denormalize for visualization
+mean = np.array([0.485, 0.456, 0.406])
+std = np.array([0.229, 0.224, 0.225])
+img = std * img + mean
+img = np.clip(img, 0, 1)
+
 mask = masks[0].cpu().numpy()
 pred = preds[0].cpu().numpy()
 
 # IoU plot
-plt.figure(figsize=(8,6))
-plt.plot(range(1, EPOCHS+1), val_ious, label="Validation IoU", color="green")
+plt.figure(figsize=(8, 6))
+plt.plot(range(1, len(val_ious) + 1), val_ious, label="Validation IoU", color="green")
 plt.xlabel("Epoch")
 plt.ylabel("IoU")
 plt.title("Validation IoU over epochs")
 plt.grid(True)
 plt.legend()
+plt.savefig(os.path.join(SAVE_DIR, 'iou_plot.png'), dpi=150, bbox_inches='tight')
 plt.show()
 
 # Loss plot
-plt.figure(figsize=(8,6))
-plt.plot(range(1, EPOCHS+1), train_losses, label="Training Loss")
-plt.plot(range(1, EPOCHS+1), val_losses, label="Validation Loss")
+plt.figure(figsize=(8, 6))
+plt.plot(range(1, len(train_losses) + 1), train_losses, label="Training Loss")
+plt.plot(range(1, len(val_losses) + 1), val_losses, label="Validation Loss")
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
 plt.title("Training vs Validation Loss")
 plt.ylim(0, .66)
 plt.legend()
 plt.grid(True)
+plt.savefig(os.path.join(SAVE_DIR, 'loss_plot.png'), dpi=150, bbox_inches='tight')
 plt.show()
 
 # Images plot
-plt.figure(figsize=(12,4))
-plt.subplot(1,3,1)
+plt.figure(figsize=(12, 4))
+plt.subplot(1, 3, 1)
 plt.title("Image")
 plt.imshow(img)
+plt.axis('off')
 
-plt.subplot(1,3,2)
+plt.subplot(1, 3, 2)
 plt.title("Mask")
 plt.imshow(mask, cmap="gray")
+plt.axis('off')
 
-plt.subplot(1,3,3)
+plt.subplot(1, 3, 3)
 plt.title("Prediction")
 plt.imshow(pred, cmap="gray")
+plt.axis('off')
+plt.savefig(os.path.join(SAVE_DIR, 'prediction_sample.png'), dpi=150, bbox_inches='tight')
 plt.show()
+
+print(f"\n✓ Training complete! Best validation IoU: {best_val_iou:.4f}")
+print(f"✓ Model saved to: {best_model_path}")
